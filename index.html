@@ -1,0 +1,469 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <title>벽돌깨기 - 점수/노랑/파랑/빨강 블럭</title>
+  <style>
+    body { margin: 0; background: #222; }
+    canvas { display: block; margin: 20px auto; background: #111; }
+    #ui { text-align: center; color: white; font-size: 24px; font-family: sans-serif; margin-top: 10px;}
+    #highscore { text-align: center; color: #ffe066; font-size: 22px; font-family: sans-serif; margin-top: 20px;}
+    #reset-highscore { text-align: center; margin: 12px; }
+    #reset-highscore button { font-size: 20px; background: #e63946; color: #fff; border: none; padding: 6px 18px; border-radius: 6px; cursor:pointer; }
+  </style>
+</head>
+<body>
+<div id="ui"></div>
+<canvas id="game" width="780" height="520"></canvas>
+<div id="highscore"></div>
+<div id="reset-highscore">
+  <button onclick="localStorage.removeItem('breakoutHighScore');location.reload();">최고점수 초기화</button>
+</div>
+<script>
+const canvas = document.getElementById('game');
+const ctx = canvas.getContext('2d');
+const ui = document.getElementById('ui');
+const highscoreDiv = document.getElementById('highscore');
+
+const brickRowCount = 6;
+const brickSize = 30;
+const brickPadding = 0;
+const brickOffsetTop = 52;
+const brickOffsetLeft = 0;
+const brickColCount = Math.floor(canvas.width / brickSize);
+
+const fixedRedCount = 15; // 빨간 블럭 개수
+const luckyChance = 0.01; // 파란 블럭 1%
+const yellowChance = 0.003; // 노란 블럭 0.3%
+const newBallChance = 0.024;
+const timeLimit = 180;
+const orangeChance = 0.2;
+const orangeDuration = 3000;
+const orangeSpeedMultiplier = 1.4;
+const normalBallColor = "#f9c74f";
+const orangeBallColor = "#ff9900";
+
+// 패들 160px
+let paddle = {
+    x: Math.floor(canvas.width/2 - 160/2),
+    y: canvas.height - 50,
+    width: 160,
+    height: 15,
+    speed: 8,
+    movingLeft: false,
+    movingRight: false,
+};
+
+let bricks = [];
+function initBricks() {
+    bricks = [];
+    let totalBricks = brickRowCount * brickColCount;
+    let brickIndices = [];
+    for(let i=0; i<totalBricks; i++) brickIndices.push(i);
+
+    // 빨간블럭 위치 15개 랜덤 추출
+    let fixedRedSet = new Set();
+    while(fixedRedSet.size < fixedRedCount) {
+        let idx = brickIndices[Math.floor(Math.random()*brickIndices.length)];
+        fixedRedSet.add(idx);
+    }
+
+    for(let r=0; r<brickRowCount; r++) {
+        bricks[r] = [];
+        for(let c=0; c<brickColCount; c++) {
+            let idx = r * brickColCount + c;
+            let status = 1; // 1:녹색(일반), 2:빨강(안깨짐), 3:파랑(럭키), 4:노랑
+            if (fixedRedSet.has(idx)) {
+                status = 2; // 빨강
+            } else if (Math.random() < luckyChance) {
+                status = 3; // 파랑
+            } else if (Math.random() < yellowChance) {
+                status = 4; // 노랑
+            }
+            bricks[r][c] = { x:0, y:0, status };
+        }
+    }
+}
+
+let isOrangeMode = false;
+let orangeStartTime = 0;
+
+let balls = [];
+let ballReady = true;
+let timerStarted = false;
+let timerStartTime = null;
+
+let showLucky = false;
+let luckyShowTime = 0;
+
+function initBall() {
+    balls = [
+        {
+            x: paddle.x + paddle.width / 2,
+            y: paddle.y - 12,
+            radius: 10,
+            vx: 4,
+            vy: -4
+        }
+    ];
+    ballReady = true;
+    timerStarted = false;
+    timerStartTime = null;
+    showLucky = false;
+    luckyShowTime = 0;
+    isOrangeMode = false;
+    orangeStartTime = 0;
+}
+
+let score = 0;
+let gameOver = false;
+let gameWin = false;
+let timeOver = false;
+let waitingForRestart = false;
+
+function getHighScore() {
+    return parseInt(localStorage.getItem('breakoutHighScore') || '0', 10);
+}
+function setHighScore(newScore) {
+    localStorage.setItem('breakoutHighScore', String(newScore));
+}
+function showHighScore() {
+    highscoreDiv.innerHTML = `최고 점수: <span style="color:#fae100;font-weight:bold">${getHighScore()}</span>`;
+}
+
+function drawBalls() {
+    balls.forEach(ball => {
+        ctx.beginPath();
+        ctx.arc(ball.x, ball.y, ball.radius, 0, Math.PI*2);
+        ctx.fillStyle = isOrangeMode ? orangeBallColor : normalBallColor;
+        ctx.fill();
+        ctx.closePath();
+    });
+}
+
+function drawPaddle() {
+    ctx.fillStyle = "#577590";
+    ctx.fillRect(paddle.x, paddle.y, paddle.width, paddle.height);
+}
+
+function drawBricks() {
+    for(let r=0; r<brickRowCount; r++) {
+        for(let c=0; c<brickColCount; c++) {
+            let b = bricks[r][c];
+            if(b.status !== 0) {
+                let brickX = brickOffsetLeft + c * (brickSize + brickPadding);
+                let brickY = brickOffsetTop + r * (brickSize + brickPadding);
+                b.x = brickX;
+                b.y = brickY;
+                if (b.status === 2) {
+                    ctx.fillStyle = "#e63946"; // 빨강(안깨짐)
+                } else if (b.status === 3) {
+                    ctx.fillStyle = "#3498db"; // 파랑(럭키)
+                } else if (b.status === 4) {
+                    ctx.fillStyle = "#ffe066"; // 노랑(30점)
+                } else {
+                    ctx.fillStyle = "#90be6d"; // 일반(10점)
+                }
+                ctx.fillRect(brickX, brickY, brickSize, brickSize);
+                ctx.strokeStyle = "#fff";
+                ctx.strokeRect(brickX, brickY, brickSize, brickSize);
+            }
+        }
+    }
+}
+
+function drawLuckyMessage() {
+    if (showLucky) {
+        ctx.save();
+        ctx.font = "bold 64px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = "#3498db";
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.fillText("럭키! +50점", canvas.width/2, canvas.height/2);
+        ctx.strokeText("럭키! +50점", canvas.width/2, canvas.height/2);
+        ctx.restore();
+    }
+}
+function drawOrangeMessage() {
+    if (isOrangeMode) {
+        ctx.save();
+        ctx.font = "bold 40px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "top";
+        ctx.fillStyle = "#ff9900";
+        ctx.strokeStyle = "#fff";
+        ctx.lineWidth = 2;
+        ctx.fillText("주황볼 +40% 속도!", canvas.width/2, 10);
+        ctx.strokeText("주황볼 +40% 속도!", canvas.width/2, 10);
+        ctx.restore();
+    }
+}
+
+function drawUI() {
+    let remainTime = timerStarted && timerStartTime
+        ? Math.max(0, timeLimit - Math.floor((Date.now() - timerStartTime) / 1000))
+        : timeLimit;
+    let msg = `점수: ${score} | 공 개수: ${balls.length} | 남은 시간: ${remainTime}s`;
+    if (gameWin) msg += ' <span style="color:lightgreen;">게임 승리!</span>';
+    if (gameOver) msg += ' <span style="color:red;">게임 오버!</span>';
+    if (timeOver && !gameWin) msg += ' <span style="color:orange;">시간 초과!</span>';
+    if (ballReady && !gameOver && !gameWin && !timeOver) {
+        msg += '<br><span style="color:#fae100;">스페이스바를 눌러 공과 타이머를 시작하세요!</span>';
+    }
+    ui.innerHTML = msg;
+}
+
+function maybeTriggerOrangeBall() {
+    if (!isOrangeMode && Math.random() < orangeChance) {
+        isOrangeMode = true;
+        orangeStartTime = Date.now();
+        balls.forEach(ball => {
+            ball.vx *= orangeSpeedMultiplier;
+            ball.vy *= orangeSpeedMultiplier;
+        });
+    }
+}
+
+function updateBalls() {
+    if (ballReady) return;
+    if (isOrangeMode && Date.now() - orangeStartTime > orangeDuration) {
+        isOrangeMode = false;
+        balls.forEach(ball => {
+            ball.vx /= orangeSpeedMultiplier;
+            ball.vy /= orangeSpeedMultiplier;
+        });
+    } else if (!isOrangeMode && Math.random() < orangeChance / 60) {
+        maybeTriggerOrangeBall();
+    }
+    balls.forEach((ball, ballIndex) => {
+        ball.x += ball.vx;
+        ball.y += ball.vy;
+        
+        if (ball.x - ball.radius < 0 || ball.x + ball.radius > canvas.width) {
+            ball.vx *= -1;
+        }
+        if (ball.y - ball.radius < 0) {
+            ball.vy *= -1;
+        }
+        if (
+            ball.y + ball.radius >= paddle.y &&
+            ball.x >= paddle.x &&
+            ball.x <= paddle.x + paddle.width &&
+            ball.y + ball.radius <= paddle.y + paddle.height
+        ) {
+            ball.vy *= -1;
+            ball.y = paddle.y - ball.radius;
+        }
+        if (ball.y - ball.radius > canvas.height) {
+            balls.splice(ballIndex, 1);
+            if (balls.length === 0 && !gameWin && !timeOver) {
+                gameOver = true;
+            }
+        }
+        for(let r=0; r<brickRowCount; r++) {
+            for(let c=0; c<brickColCount; c++) {
+                let b = bricks[r][c];
+                if(b.status !== 0) {
+                    let bx = b.x, by = b.y;
+                    let bw = brickSize, bh = brickSize;
+                    if (
+                        ball.x + ball.radius > bx &&
+                        ball.x - ball.radius < bx + bw &&
+                        ball.y + ball.radius > by &&
+                        ball.y - ball.radius < by + bh
+                    ) {
+                        let collided = false;
+                        if (
+                            (ball.y - ball.radius < by + bh && ball.y > by + bh) ||
+                            (ball.y + ball.radius > by && ball.y < by)
+                        ) {
+                            ball.vy *= -1;
+                            collided = true;
+                        }
+                        if (
+                            (ball.x - ball.radius < bx + bw && ball.x > bx + bw) ||
+                            (ball.x + ball.radius > bx && ball.x < bx)
+                        ) {
+                            ball.vx *= -1;
+                            collided = true;
+                        }
+                        if (collided && b.status === 1) {
+                            b.status = 0;
+                            score += 10;
+                            if (Math.random() < newBallChance) {
+                                balls.push({
+                                    x: ball.x,
+                                    y: ball.y,
+                                    radius: 10,
+                                    vx: (Math.random() > 0.5 ? 4 : -4),
+                                    vy: -4
+                                });
+                            }
+                            if (score > getHighScore()) setHighScore(score);
+                            if (score >= countBreakableBricksInit) {
+                                gameWin = true;
+                                gameOver = false;
+                                balls = [];
+                            }
+                        }
+                        // 빨강: 깨지지 않음
+                        if (collided && b.status === 2) {
+                            if (ball.vy > 0 && ball.y < by) {
+                                ball.y = by - ball.radius;
+                            } else if (ball.vy < 0 && ball.y > by + bh) {
+                                ball.y = by + bh + ball.radius;
+                            }
+                            if (ball.vx > 0 && ball.x < bx) {
+                                ball.x = bx - ball.radius;
+                            } else if (ball.vx < 0 && ball.x > bx + bw) {
+                                ball.x = bx + bw + ball.radius;
+                            }
+                        }
+                        // 파랑: 50점, 메시지, 공 5개 추가
+                        if (collided && b.status === 3) {
+                            b.status = 0;
+                            score += 50;
+                            showLucky = true;
+                            luckyShowTime = Date.now();
+                            for(let i=0; i<5; i++) {
+                                let angle = Math.PI/2 + (i-2)*Math.PI/10;
+                                balls.push({
+                                    x: bx + bw/2,
+                                    y: by + bh/2,
+                                    radius: 10,
+                                    vx: Math.cos(angle)*4 * (isOrangeMode ? orangeSpeedMultiplier : 1),
+                                    vy: Math.sin(angle)*4 * (isOrangeMode ? orangeSpeedMultiplier : 1)
+                                });
+                            }
+                            if (score > getHighScore()) setHighScore(score);
+                            if (score >= countBreakableBricksInit) {
+                                gameWin = true;
+                                gameOver = false;
+                                balls = [];
+                            }
+                        }
+                        // 노랑: 30점
+                        if (collided && b.status === 4) {
+                            b.status = 0;
+                            score += 30;
+                            if (score > getHighScore()) setHighScore(score);
+                            if (score >= countBreakableBricksInit) {
+                                gameWin = true;
+                                gameOver = false;
+                                balls = [];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
+    if (showLucky && Date.now() - luckyShowTime > 3000) {
+        showLucky = false;
+    }
+}
+
+let countBreakableBricksInit = 0;
+function countBreakableBricks() {
+    let cnt = 0;
+    for(let r=0; r<brickRowCount; r++) {
+        for(let c=0; c<brickColCount; c++) {
+            if (bricks[r][c].status === 1 || bricks[r][c].status === 3 || bricks[r][c].status === 4) cnt++;
+        }
+    }
+    return cnt * 10; // 최고점수 비교용(최대 10점)
+}
+
+function updatePaddle() {
+    if (paddle.movingLeft) paddle.x -= paddle.speed;
+    if (paddle.movingRight) paddle.x += paddle.speed;
+    if (paddle.x < 0) paddle.x = 0;
+    if (paddle.x + paddle.width > canvas.width) paddle.x = canvas.width - paddle.width;
+    if (ballReady && balls.length > 0) {
+        balls[0].x = paddle.x + paddle.width / 2;
+    }
+}
+
+function checkTimeOver() {
+    if (!timerStarted || !timerStartTime) return;
+    let elapsed = (Date.now() - timerStartTime) / 1000;
+    if (elapsed >= timeLimit && !gameWin) {
+        timeOver = true;
+        balls = [];
+        gameOver = true;
+    }
+}
+
+function gameLoop() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    drawBricks();
+    drawBalls();
+    drawPaddle();
+    drawLuckyMessage();
+    drawOrangeMessage();
+    drawUI();
+    showHighScore();
+
+    if (!gameOver && !gameWin && !timeOver) {
+        updateBalls();
+        updatePaddle();
+        checkTimeOver();
+        requestAnimationFrame(gameLoop);
+    } else {
+        waitingForRestart = true;
+        let msg = gameWin ? '게임을 클리어했습니다! 스페이스바를 눌러 다시 시작하세요.' 
+                          : '스페이스바를 눌러 다시 시작하세요.';
+        if (timeOver && !gameWin) msg = '시간초과! 스페이스바를 눌러 다시 시작하세요.';
+        ui.innerHTML += `<br><span style="font-size:20px;color:#fae100;">${msg}</span>`;
+        showHighScore();
+    }
+}
+
+window.addEventListener('keydown', e => {
+    if (e.code === 'ArrowLeft') paddle.movingLeft = true;
+    if (e.code === 'ArrowRight') paddle.movingRight = true;
+    if (waitingForRestart && e.code === "Space") {
+        waitingForRestart = false;
+        restartGame();
+    }
+    if (ballReady && !gameOver && !gameWin && !timeOver && e.code === "Space") {
+        ballReady = false;
+        timerStarted = true;
+        timerStartTime = Date.now();
+    }
+});
+window.addEventListener('keyup', e => {
+    if (e.code === 'ArrowLeft') paddle.movingLeft = false;
+    if (e.code === 'ArrowRight') paddle.movingRight = false;
+});
+
+function restartGame() {
+    paddle = {
+        x: Math.floor(canvas.width/2 - 160/2),
+        y: canvas.height - 50,
+        width: 160,
+        height: 15,
+        speed: 8,
+        movingLeft: false,
+        movingRight: false,
+    };
+    initBricks();
+    score = 0;
+    gameOver = false;
+    gameWin = false;
+    timeOver = false;
+    countBreakableBricksInit = countBreakableBricks();
+    initBall();
+    gameLoop();
+}
+
+initBricks();
+countBreakableBricksInit = countBreakableBricks();
+showHighScore();
+initBall();
+gameLoop();
+</script>
+</body>
+</html>
